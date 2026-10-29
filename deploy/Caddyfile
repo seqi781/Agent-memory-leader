@@ -1,5 +1,17 @@
-# Replace the host with your domain; <ip-with-dashes>.sslip.io works without buying one.
-107-173-202-140.sslip.io {
+# HTTPS on the bare public IP: Let's Encrypt short-lived IP certificate, renewed automatically.
+# (A domain on a mainland-China server without ICP filing is blocked on 80/443, an IP is not.)
+{
+	# Clients connecting to a bare IP send no SNI; serve the IP certificate for them.
+	default_sni 111.229.167.172
+}
+
+https://111.229.167.172 {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+		}
+	}
 	encode gzip
 	request_body {
 		max_size 64MB
