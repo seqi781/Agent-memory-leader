@@ -1,0 +1,13 @@
+# Replace the host with your domain; <ip-with-dashes>.sslip.io works without buying one.
+107-173-202-140.sslip.io {
+	encode gzip
+	request_body {
+		max_size 64MB
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+}
