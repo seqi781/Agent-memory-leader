@@ -51,4 +51,5 @@ RERANK_CHARS = _int("RERANK_CHARS", 600)  # characters of each candidate shown t
 RERANK_CONTEXT_CHARS = _int("RERANK_CONTEXT_CHARS", 200)  # characters of the preceding turn added as context
 RERANK_BLEND = _int("RERANK_BLEND", 0)  # 0 = order by reranker score, 1 = RRF of BM25 and reranker ranks
 RERANK_THREADS = _int("RERANK_THREADS", 2)
-RERANK_BATCH = _int("RERANK_BATCH", 32)
+RERANK_BATCH = _int("RERANK_BATCH", 16)
+RERANK_MAX_TOKENS = _int("RERANK_MAX_TOKENS", 256)  # query + candidate, truncated

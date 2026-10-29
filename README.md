@@ -20,7 +20,7 @@ It implements the AML Add / Search contract: Add stores conversation turns, and 
 
 **Search**
 - BM25 ranks the user's turns against the question. When `options` are present, a second query that includes them is fused in with Reciprocal Rank Fusion.
-- **Cross-encoder reranking:** the top 100 BM25 candidates are re-scored by `ms-marco-MiniLM-L-6-v2`. It is a 22M-parameter ONNX model running on the service's own CPU, so it adds no API cost. Each candidate is scored together with the preceding turn, so short replies keep their context. In local tests, evidence recall within a 12k budget rose from 83% to 96% on LongMemEval-S and from 92.5% to 95% on LoCoMo.
+- **Cross-encoder reranking:** the top 100 BM25 candidates are re-scored by `ms-marco-MiniLM-L-6-v2`. It is a 22M-parameter ONNX model running on the service's own CPU (memory arena off, inputs capped at 256 tokens), so it adds no API cost. Each candidate is scored together with the preceding turn, so short replies keep their context. In local tests, evidence recall within a 12k budget rose from 83% to 96% on LongMemEval-S and from 92.5% to 95% on LoCoMo.
 - Each hit is expanded into a **session window**: the hit plus up to four adjacent turns on each side (at most 800 characters per side) from the same session. Overlapping or adjacent windows are merged.
 - Windows are returned in relevance order. Each starts with its absolute date, for example `[Date: 8 May 2023 (Monday), 13:56]`, followed by `speaker: text` lines.
 - Evidence is packed into a budget of about **16k tokens**. If the user's history is smaller than that, the remaining budget is filled with whole sessions, most recent first.
@@ -81,4 +81,4 @@ Production deployment uses `deploy/aml-memory.service` (systemd) behind `deploy/
 
 ## Attribution
 
-This is original work for the AML 2026 challenge. It uses FastAPI, SQLite FTS5, fastembed/ONNX Runtime, and the MS MARCO MiniLM cross-encoder from sentence-transformers. Reciprocal Rank Fusion follows Cormack et al. (SIGIR 2009). The evaluation prompts come from the AML public repository.
+This is original work for the AML 2026 challenge. It uses FastAPI, SQLite FTS5, ONNX Runtime with Hugging Face tokenizers, and the MS MARCO MiniLM cross-encoder from sentence-transformers. Reciprocal Rank Fusion follows Cormack et al. (SIGIR 2009). The evaluation prompts come from the AML public repository.
