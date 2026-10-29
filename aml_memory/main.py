@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from . import config
+from . import config, rerank
 from .store import Piece, Store
 from .text import chunk_text
 from .timeresolve import annotate
@@ -25,6 +25,7 @@ state: dict[str, Any] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state["store"] = Store()
+    rerank.warmup()  # load the reranker before serving, so the first Search is not slow
     yield
 
 

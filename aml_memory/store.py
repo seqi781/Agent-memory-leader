@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from . import config
+from . import config, rerank
 from .text import est_tokens, format_time, iso_time, keyword_tokens
 
 SCHEMA = """
@@ -199,6 +199,33 @@ def _rank_hits(db: sqlite3.Connection, query: str, options: list[str]) -> list[i
     return [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
 
 
+def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list[int]) -> list[int]:
+    """Re-score the top BM25 candidates with the cross-encoder; the tail keeps BM25 order."""
+    head, tail = ranked[: config.RERANK_TOP], ranked[config.RERANK_TOP :]
+    docs, keep = [], []
+    for rid in head:
+        t = _turn(db, rid)
+        if t is None:
+            continue
+        text = f"{t.role}: {t.content[: config.RERANK_CHARS]}"
+        if config.RERANK_CONTEXT_CHARS > 0:
+            prev = _neighbors(db, t, True, 1)
+            if prev:
+                text = f"{prev[0].role}: {prev[0].content[: config.RERANK_CONTEXT_CHARS]}\n{text}"
+        docs.append(text)
+        keep.append(rid)
+    q = query if not options else query + "\n" + "\n".join(options)
+    sc = rerank.scores(q, docs)
+    by_ce = [rid for _, rid in sorted(zip(sc, keep), key=lambda x: -x[0])]
+    if config.RERANK_BLEND:
+        fused: dict[int, float] = {}
+        for lst in (keep, by_ce):
+            for rank, rid in enumerate(lst):
+                fused[rid] = fused.get(rid, 0.0) + 1.0 / (config.RRF_K + rank + 1)
+        by_ce = [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+    return by_ce + tail
+
+
 def _turn(db: sqlite3.Connection, rid: int) -> Turn | None:
     row = db.execute("SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE rid=?", (rid,)).fetchone()
     return Turn(*row) if row else None
@@ -250,7 +277,10 @@ def _search(db: sqlite3.Connection, query: str, options: list[str], top_k: int) 
         return sum(est_tokens(t.content) + 4 for t in turns) + 16
 
     covered: set[int] = set()
-    for rid in _rank_hits(db, query, options):
+    ranked = _rank_hits(db, query, options)
+    if rerank.enabled() and ranked:
+        ranked = _rerank(db, query, options, ranked)
+    for rid in ranked:
         if used >= budget:
             break
         if rid in covered:

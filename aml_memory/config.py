@@ -40,5 +40,15 @@ CANDIDATES = _int("CANDIDATES", 400)  # BM25 hits considered per query variant
 RRF_K = _int("RRF_K", 60)
 NEIGHBOR_TURNS = _int("NEIGHBOR_TURNS", 4)  # adjacent turns added on each side of a hit
 NEIGHBOR_CHARS = _int("NEIGHBOR_CHARS", 800)  # character allowance per side
-CONTEXT_TOKENS = _int("CONTEXT_TOKENS", 12000)  # evidence budget per Search (platform cap is ~117k)
+CONTEXT_TOKENS = _int("CONTEXT_TOKENS", 16000)  # evidence budget per Search (platform cap is ~117k)
 RESOLVE_TIME = _int("RESOLVE_TIME", 1)  # annotate relative time expressions with absolute dates
+
+# Cross-encoder reranker over the top BM25 candidates (set RERANK_MODEL= to turn it off).
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", ROOT / "models"))
+RERANK_TOP = _int("RERANK_TOP", 100)  # BM25 candidates re-scored
+RERANK_CHARS = _int("RERANK_CHARS", 600)  # characters of each candidate shown to the reranker
+RERANK_CONTEXT_CHARS = _int("RERANK_CONTEXT_CHARS", 200)  # characters of the preceding turn added as context
+RERANK_BLEND = _int("RERANK_BLEND", 0)  # 0 = order by reranker score, 1 = RRF of BM25 and reranker ranks
+RERANK_THREADS = _int("RERANK_THREADS", 2)
+RERANK_BATCH = _int("RERANK_BATCH", 32)

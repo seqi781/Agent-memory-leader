@@ -160,19 +160,21 @@ async def main() -> None:
 
             async def one(q: dict) -> dict:
                 nonlocal prompt_tokens, t_search
-                t1 = time.time()
                 async with sem:
+                    t1 = time.time()
                     r = await svc.post("/v1/memories/search", json={"query": q["question"], "user_id": user_id, "top_k": 100})
                 r.raise_for_status()
                 t_search += time.time() - t1
                 hits = [d["content"] for d in r.json()["data"]]
+                # Ignore the date annotations the service inserts when matching evidence text.
+                plain = [re.sub(r" \([^()]*?\d{4}\)", "", h) for h in hits]
                 cum, positions = 0, []
                 cum_at = []
                 for h in hits:
                     cum += est_tokens(h)
                     cum_at.append(cum)
                 for e in q["evidence"]:
-                    pos = next((cum_at[i] for i, h in enumerate(hits) if e in h), None)
+                    pos = next((cum_at[i] for i, h in enumerate(plain) if e in h), None)
                     positions.append(pos)
                 rec = {"user": ukey, **{k: q[k] for k in ("question", "gold", "category")},
                        "evidence_token_pos": positions, "context_tokens": cum, "items": len(hits)}
