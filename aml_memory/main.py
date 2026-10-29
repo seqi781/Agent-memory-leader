@@ -41,7 +41,7 @@ def _error(status: int, msg: str) -> JSONResponse:
 
 @app.middleware("http")
 async def auth(request: Request, call_next):
-    if config.SERVICE_KEY and request.url.path != "/health":
+    if config.SERVICE_KEY and request.url.path != "/health" and request.method != "HEAD":
         header = request.headers.get("authorization", "")
         token = header.split(" ", 1)[1].strip() if " " in header else ""
         token = token or request.headers.get("x-api-key", "")
