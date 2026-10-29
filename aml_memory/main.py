@@ -12,9 +12,9 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import config
-from .embed import Embedder
 from .store import Piece, Store
 from .text import chunk_text
+from .timeresolve import annotate
 
 log = logging.getLogger("aml_memory")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -25,9 +25,7 @@ state: dict[str, Any] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state["store"] = Store()
-    state["embedder"] = Embedder()
     yield
-    await state["embedder"].close()
 
 
 app = FastAPI(title="AML Memory", lifespan=lifespan)
@@ -127,6 +125,8 @@ async def add(request: Request):
                 raise BadRequest(f"message {i} has empty content")
             ts = _timestamp(msg.get("timestamp"))
             ts = ts if ts is not None else default_ts
+            if config.RESOLVE_TIME:
+                text = annotate(text, ts)
             for j, chunk in enumerate(chunk_text(text, config.CHUNK_CHARS, config.CHUNK_OVERLAP)):
                 pieces.append(Piece(msg_idx=i, chunk_idx=j, role=role, ts=ts, content=chunk))
     except BadRequest as e:
@@ -135,16 +135,8 @@ async def add(request: Request):
         return _error(400, "invalid JSON")
 
     store: Store = state["store"]
-    ok = {"success": True, "request_id": request_id, "user_id": user_id, "session_id": session_id}
-    if await run_in_threadpool(store.has_request, request_id):
-        return ok
-    try:
-        vecs = await state["embedder"].embed([f"{p.role}: {p.content}" for p in pieces])
-    except Exception as e:  # upstream failure: let the platform retry
-        log.exception("embedding failed for add %s", request_id)
-        return _error(503, f"embedding unavailable: {e}")
-    await run_in_threadpool(store.add, request_id, user_id, session_id, pieces, vecs)
-    return ok
+    await run_in_threadpool(store.add, request_id, user_id, session_id, pieces)  # idempotent on request_id
+    return {"success": True, "request_id": request_id, "user_id": user_id, "session_id": session_id}
 
 
 @app.post("/v1/memories/search")
@@ -169,14 +161,5 @@ async def search(request: Request):
     except ValueError:
         return _error(400, "invalid JSON")
 
-    variants = [query]
-    if options:
-        variants.append(query + "\n" + "\n".join(options))
-    try:
-        qvecs = await state["embedder"].embed(variants)
-    except Exception as e:
-        log.exception("embedding failed for search")
-        return _error(503, f"embedding unavailable: {e}")
-    keyword_query = " ".join([query, *options])
-    data = await run_in_threadpool(state["store"].search, user_id, qvecs, keyword_query, top_k)
+    data = await run_in_threadpool(state["store"].search, user_id, query, options, top_k)
     return {"data": data[:top_k]}

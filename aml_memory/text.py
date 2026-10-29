@@ -68,16 +68,16 @@ def format_time(ts_ms: int | None) -> str:
     if ts_ms is None:
         return ""
     dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M (%a)")
+    return f"{dt.day} {dt:%B %Y} ({dt:%A}), {dt:%H:%M}"
+
+
+def est_tokens(text: str) -> int:
+    """Rough token count: ~4 characters per token for Latin text, ~1 per CJK character."""
+    cjk = len(_CJK.findall(text))
+    return cjk + (len(text) - cjk) // 4 + 1
 
 
 def iso_time(ts_ms: int | None) -> str | None:
     if ts_ms is None:
         return None
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def format_line(role: str, content: str, ts_ms: int | None) -> str:
-    when = format_time(ts_ms)
-    prefix = f"[{when}] " if when else ""
-    return f"{prefix}{role}: {content}"
