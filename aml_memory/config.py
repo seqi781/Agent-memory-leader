@@ -38,7 +38,7 @@ CHUNK_OVERLAP = _int("CHUNK_OVERLAP", 200)
 # Retrieval
 CANDIDATES = _int("CANDIDATES", 400)  # BM25 hits considered per query variant
 RRF_K = _int("RRF_K", 60)
-NEIGHBOR_TURNS = _int("NEIGHBOR_TURNS", 2)  # adjacent turns added on each side of a hit
+NEIGHBOR_TURNS = _int("NEIGHBOR_TURNS", 4)  # adjacent turns added on each side of a hit
 NEIGHBOR_CHARS = _int("NEIGHBOR_CHARS", 800)  # character allowance per side
 CONTEXT_TOKENS = _int("CONTEXT_TOKENS", 12000)  # evidence budget per Search (platform cap is ~117k)
 RESOLVE_TIME = _int("RESOLVE_TIME", 1)  # annotate relative time expressions with absolute dates

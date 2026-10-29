@@ -20,7 +20,7 @@ It implements the AML Add / Search contract: Add stores conversation turns, and 
 
 **Search**
 - BM25 ranks the user's turns against the question. When `options` are present, a second query that includes them is fused in with Reciprocal Rank Fusion.
-- Each hit is expanded into a **session window**: the hit plus up to two adjacent turns on each side from the same session. Overlapping or adjacent windows are merged.
+- Each hit is expanded into a **session window**: the hit plus up to four adjacent turns on each side (at most 800 characters per side) from the same session. Overlapping or adjacent windows are merged.
 - Windows are returned in relevance order. Each starts with its absolute date, for example `[Date: 8 May 2023 (Monday), 13:56]`, followed by `speaker: text` lines.
 - Evidence is packed into a budget of about **12k tokens**. If the user's history is smaller than that, the remaining budget is filled with whole sessions, most recent first.
 - Local tests on LoCoMo and LongMemEval-S found that a focused 12k context beats larger ones (24k–48k): evidence recall stays high, and the answer model is distracted less.
@@ -65,7 +65,7 @@ Production deployment uses `deploy/aml-memory.service` (systemd) behind `deploy/
 | Variable | Default | Meaning |
 |---|---|---|
 | `CONTEXT_TOKENS` | 12000 | evidence budget per Search |
-| `NEIGHBOR_TURNS` / `NEIGHBOR_CHARS` | 2 / 800 | session-window expansion around each hit |
+| `NEIGHBOR_TURNS` / `NEIGHBOR_CHARS` | 4 / 800 | session-window expansion around each hit |
 | `CANDIDATES` | 400 | BM25 hits considered per query variant |
 | `RESOLVE_TIME` | 1 | relative time annotation on/off |
 | `CHUNK_CHARS` / `CHUNK_OVERLAP` | 1500 / 200 | long-message chunking |
