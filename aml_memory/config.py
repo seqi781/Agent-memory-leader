@@ -26,7 +26,7 @@ def _int(name: str, default: int) -> int:
 
 # Storage: one SQLite file per user_id under DATA_DIR/users/
 DATA_DIR = Path(os.environ.get("AML_DATA_DIR", ROOT / "data"))
-OPEN_USER_DBS = _int("OPEN_USER_DBS", 256)
+OPEN_USER_DBS = _int("OPEN_USER_DBS", 64)
 
 # Service auth: when set, requests must carry it as Bearer / Token / X-Api-Key.
 SERVICE_KEY = os.environ.get("AML_SERVICE_KEY", "")

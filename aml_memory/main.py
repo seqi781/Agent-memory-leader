@@ -50,7 +50,7 @@ async def auth(request: Request, call_next):
     return await call_next(request)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
 
@@ -102,6 +102,13 @@ def _timestamp(value: Any) -> int | None:
 
 
 # ---------- endpoints ----------
+@app.head("/v1/memories/add")
+@app.head("/v1/memories/search")
+async def probe():
+    """Reachability probes (HEAD) get a plain 200."""
+    return JSONResponse(content=None)
+
+
 @app.post("/v1/memories/add")
 async def add(request: Request):
     try:

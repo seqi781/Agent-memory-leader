@@ -77,6 +77,7 @@ class UserDB:
         self.db.execute("PRAGMA busy_timeout=60000")  # several worker processes may share a user file
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.execute("PRAGMA cache_size=-1024")  # 1 MB page cache per open user file
         self.db.executescript(SCHEMA)
         self.lock = threading.Lock()
 
