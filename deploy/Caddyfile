@@ -17,11 +17,20 @@ https://111.229.167.172 {
 		max_size 64MB
 	}
 	# The leaderboard key's endpoints are fixed to the root paths, so the root serves the current
-	# version (v0.4, port 8010). v0.3 (port 8000, Full finished) stays reachable under /v3 for
-	# reproduction; /v4 is an alias of the root.
+	# version: v0.5 on the GPU host, reached over Tailscale (100.100.92.37:8010). /v5 is an alias.
+	# v0.4 (local, port 8010) is under /v4 and v0.3 (local, port 8000) under /v3, for reproduction.
 	handle_path /v3/* {
 		reverse_proxy 127.0.0.1:8000 {
 			transport http {
+				read_timeout 30m
+				write_timeout 30m
+			}
+		}
+	}
+	handle_path /v5/* {
+		reverse_proxy 100.100.92.37:8010 {
+			transport http {
+				dial_timeout 10s
 				read_timeout 30m
 				write_timeout 30m
 			}
@@ -36,8 +45,9 @@ https://111.229.167.172 {
 		}
 	}
 	handle {
-		reverse_proxy 127.0.0.1:8010 {
+		reverse_proxy 100.100.92.37:8010 {
 			transport http {
+				dial_timeout 10s
 				read_timeout 30m
 				write_timeout 30m
 			}
