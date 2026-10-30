@@ -53,3 +53,37 @@ RERANK_BLEND = _int("RERANK_BLEND", 0)  # 0 = order by reranker score, 1 = RRF o
 RERANK_THREADS = _int("RERANK_THREADS", 2)
 RERANK_BATCH = _int("RERANK_BATCH", 16)
 RERANK_MAX_TOKENS = _int("RERANK_MAX_TOKENS", 256)  # query + candidate, truncated
+
+# Dense retrieval with text-embedding-v4 (leave EMBED_MODEL empty to run keyword-only).
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-v4")
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+EMBED_API_KEY = os.environ.get("EMBED_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+EMBED_DIM = _int("EMBED_DIM", 1024)
+EMBED_BATCH = _int("EMBED_BATCH", 10)  # API maximum per request
+EMBED_CONCURRENCY = _int("EMBED_CONCURRENCY", 8)  # in-flight API calls per worker process
+EMBED_CHARS = _int("EMBED_CHARS", 2000)  # characters of each turn sent for embedding
+EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", 30))
+EMBED_RETRIES = _int("EMBED_RETRIES", 9)
+EMBED_CACHE = os.environ.get("EMBED_CACHE", "")  # optional sqlite file caching vectors (local experiments)
+DENSE_CANDIDATES = _int("DENSE_CANDIDATES", 200)  # nearest turns by cosine added to the candidate pool
+DENSE_WEIGHT = float(os.environ.get("DENSE_WEIGHT", 1.0))  # weight of the dense list in rank fusion
+
+# Write-time memory notes with gpt-4o-mini (NOTES=0 turns them off).
+NOTES = _int("NOTES", 0)
+NOTES_MODEL = os.environ.get("NOTES_MODEL", "openai/gpt-4o-mini")
+NOTES_BASE_URL = os.environ.get("NOTES_BASE_URL", "https://openrouter.ai/api/v1")
+NOTES_API_KEY = os.environ.get("NOTES_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+NOTES_CONCURRENCY = _int("NOTES_CONCURRENCY", 8)  # in-flight LLM calls per worker process
+NOTES_TIMEOUT = float(os.environ.get("NOTES_TIMEOUT", 90))
+NOTES_RETRIES = _int("NOTES_RETRIES", 6)
+NOTES_MAX = _int("NOTES_MAX", 15)  # notes per LLM call
+NOTES_MAX_TOKENS = _int("NOTES_MAX_TOKENS", 900)
+NOTES_SEGMENT_CHARS = _int("NOTES_SEGMENT_CHARS", 24000)  # conversation text per LLM call
+NOTES_MAX_SEGMENTS = _int("NOTES_MAX_SEGMENTS", 4)  # LLM calls per Add request at most
+NOTES_CACHE = os.environ.get("NOTES_CACHE", "")  # optional sqlite cache (local experiments)
+
+# Search-time query rewriting with the same LLM (QUERY_EXPAND=0 turns it off).
+QUERY_EXPAND = _int("QUERY_EXPAND", 0)
+EXPAND_N = _int("EXPAND_N", 3)
+EXPAND_WEIGHT = float(os.environ.get("EXPAND_WEIGHT", 1.0))  # weight of each rewritten-query list in fusion
+EXPAND_TIMEOUT = float(os.environ.get("EXPAND_TIMEOUT", 20))

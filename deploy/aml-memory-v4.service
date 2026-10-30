@@ -1,0 +1,19 @@
+[Unit]
+Description=AML memory Add/Search service v0.4 (served under /v4)
+After=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/aml-memory-v4
+# Fewer glibc malloc arenas: avoids RSS growth from fragmentation across request threads.
+Environment=MALLOC_ARENA_MAX=2
+ExecStart=/opt/aml-memory-v4/.venv/bin/python3 -m uvicorn aml_memory.main:app --host 127.0.0.1 --port 8010 --workers 3 --timeout-keep-alive 75
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+# Safety net: if memory ever runs away, systemd restarts the service (the platform retries 5xx).
+MemoryHigh=2400M
+MemoryMax=2800M
+
+[Install]
+WantedBy=multi-user.target

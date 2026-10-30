@@ -16,10 +16,21 @@ https://111.229.167.172 {
 	request_body {
 		max_size 64MB
 	}
-	reverse_proxy 127.0.0.1:8000 {
-		transport http {
-			read_timeout 30m
-			write_timeout 30m
+	# v0.4 (hybrid BM25 + text-embedding-v4) under /v4; v0.3 stays on the root paths.
+	handle_path /v4/* {
+		reverse_proxy 127.0.0.1:8010 {
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+			}
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8000 {
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+			}
 		}
 	}
 }

@@ -6,13 +6,17 @@ computed per user, and writes for different users never contend.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import re
 import sqlite3
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from . import config, rerank
+from .notes import ROLE as NOTE_ROLE
 from .text import est_tokens, format_time, iso_time, keyword_tokens
 
 SCHEMA = """
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_ts INTEGER
 );
 CREATE TABLE IF NOT EXISTS requests (request_id TEXT PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS vecs (rid INTEGER PRIMARY KEY, v BLOB NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(terms, content='', tokenize='unicode61 remove_diacritics 2');
 """
 
@@ -113,6 +118,9 @@ class Store:
                 old.close()
             return udb
 
+    def exists(self, user_id: str) -> bool:
+        return user_id in self._open or _user_path(user_id).exists()
+
     # ---------- write ----------
     def has_request(self, user_id: str, request_id: str) -> bool:
         udb = self._user(user_id, create=False)
@@ -121,7 +129,9 @@ class Store:
         with udb.lock:
             return udb.db.execute("SELECT 1 FROM requests WHERE request_id=?", (request_id,)).fetchone() is not None
 
-    def add(self, request_id: str, user_id: str, session_id: str, pieces: list[Piece]) -> bool:
+    def add(
+        self, request_id: str, user_id: str, session_id: str, pieces: list[Piece], vectors: np.ndarray | None = None
+    ) -> bool:
         """Insert one Add request atomically. Returns False if it was already stored (idempotent retry)."""
         m = _CHUNK_NO.search(request_id)
         chunk_no = int(m.group(1)) if m else None
@@ -145,14 +155,17 @@ class Store:
                     chunk_no = cur.execute(
                         "SELECT COALESCE(MAX(pos) / 10000000, -1) + 1 FROM turns WHERE sess_no=?", (sess_no,)
                     ).fetchone()[0]
-                for p in pieces:
+                for i, p in enumerate(pieces):
                     pos = chunk_no * 10_000_000 + p.msg_idx * 1000 + min(p.chunk_idx, 999)
                     cur.execute(
                         "INSERT INTO turns(sess_no, pos, role, ts, content) VALUES (?,?,?,?,?)",
                         (sess_no, pos, p.role, p.ts, p.content),
                     )
                     terms = " ".join(keyword_tokens(f"{p.role} {p.content}"))
-                    cur.execute("INSERT INTO fts(rowid, terms) VALUES (?,?)", (cur.lastrowid, terms))
+                    rid = cur.lastrowid
+                    cur.execute("INSERT INTO fts(rowid, terms) VALUES (?,?)", (rid, terms))
+                    if vectors is not None:
+                        cur.execute("INSERT INTO vecs VALUES (?,?)", (rid, vectors[i].tobytes()))
                 cur.execute("INSERT INTO requests VALUES (?,?)", (request_id, len(pieces)))
                 cur.execute("COMMIT")
             except BaseException:
@@ -161,14 +174,23 @@ class Store:
         return True
 
     # ---------- read ----------
-    def search(self, user_id: str, query: str, options: list[str], top_k: int) -> list[dict]:
+    def search(
+        self,
+        user_id: str,
+        query: str,
+        options: list[str],
+        top_k: int,
+        qvec: np.ndarray | None = None,
+        extra: list[str] | None = None,
+        xvec: np.ndarray | None = None,
+    ) -> list[dict]:
         if top_k <= 0:
             return []
         udb = self._user(user_id, create=False)
         if udb is None:
             return []
         with udb.lock:
-            return _search(udb.db, query, options, top_k)
+            return _search(udb.db, query, options, top_k, qvec, extra, xvec)
 
     def stats(self) -> dict:
         users = list((config.DATA_DIR / "users").glob("*/*.db")) if (config.DATA_DIR / "users").exists() else []
@@ -185,17 +207,48 @@ def _bm25(db: sqlite3.Connection, text: str, limit: int) -> list[int]:
     return [r[0] for r in rows]
 
 
-def _rank_hits(db: sqlite3.Connection, query: str, options: list[str]) -> list[int]:
+def _dense(db: sqlite3.Connection, qvec: np.ndarray, limit: int) -> list[int]:
+    """Nearest turns by cosine similarity. Vectors are scanned in blocks to keep memory flat."""
+    q = qvec.astype(np.float32)
+    best: list[tuple[float, int]] = []
+    cur = db.execute("SELECT rid, v FROM vecs")
+    while True:
+        rows = cur.fetchmany(4096)
+        if not rows:
+            break
+        mat = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1)
+        sims = mat.astype(np.float32) @ q
+        k = min(limit, len(rows))
+        idx = np.argpartition(-sims, k - 1)[:k]
+        best = heapq.nlargest(limit, best + [(float(sims[i]), rows[i][0]) for i in idx])
+    return [rid for _, rid in best]
+
+
+def _rank_hits(
+    db: sqlite3.Connection,
+    query: str,
+    options: list[str],
+    qvec: np.ndarray | None = None,
+    extra: list[str] | None = None,
+    xvec: np.ndarray | None = None,
+) -> list[int]:
     n = config.CANDIDATES
-    lists = [_bm25(db, query, n)]
+    lists = [(_bm25(db, query, n), 1.0)]
     if options:
-        lists.append(_bm25(db, query + "\n" + "\n".join(options), n))
+        lists.append((_bm25(db, query + "\n" + "\n".join(options), n), 1.0))
+    if qvec is not None and config.DENSE_CANDIDATES > 0:
+        lists.append((_dense(db, qvec, config.DENSE_CANDIDATES), config.DENSE_WEIGHT))
+    for q in extra or []:
+        lists.append((_bm25(db, q, n), config.EXPAND_WEIGHT))
+    if xvec is not None and config.DENSE_CANDIDATES > 0:
+        for v in xvec:
+            lists.append((_dense(db, v, config.DENSE_CANDIDATES), config.EXPAND_WEIGHT * config.DENSE_WEIGHT))
     if len(lists) == 1:
-        return lists[0]
+        return lists[0][0]
     fused: dict[int, float] = {}
-    for lst in lists:
+    for lst, weight in lists:
         for rank, rid in enumerate(lst):
-            fused[rid] = fused.get(rid, 0.0) + 1.0 / (config.RRF_K + rank + 1)
+            fused[rid] = fused.get(rid, 0.0) + weight / (config.RRF_K + rank + 1)
     return [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
 
 
@@ -208,7 +261,7 @@ def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list
         if t is None:
             continue
         text = f"{t.role}: {t.content[: config.RERANK_CHARS]}"
-        if config.RERANK_CONTEXT_CHARS > 0:
+        if config.RERANK_CONTEXT_CHARS > 0 and t.role != NOTE_ROLE:
             prev = _neighbors(db, t, True, 1)
             if prev:
                 text = f"{prev[0].role}: {prev[0].content[: config.RERANK_CONTEXT_CHARS]}\n{text}"
@@ -232,17 +285,19 @@ def _turn(db: sqlite3.Connection, rid: int) -> Turn | None:
 
 
 def _neighbors(db: sqlite3.Connection, t: Turn, before: bool, n: int) -> list[Turn]:
+    # Nearest first on both sides; memory notes are never pulled in as neighbours.
     if before:
-        sql = "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? AND pos<? ORDER BY pos DESC LIMIT ?"
+        sql = "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? AND pos<? AND role!=? ORDER BY pos DESC LIMIT ?"
     else:
-        sql = "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? AND pos>? ORDER BY pos LIMIT ?"
-    # Nearest first on both sides.
-    return [Turn(*r) for r in db.execute(sql, (t.sess_no, t.pos, n)).fetchall()]
+        sql = "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? AND pos>? AND role!=? ORDER BY pos LIMIT ?"
+    return [Turn(*r) for r in db.execute(sql, (t.sess_no, t.pos, NOTE_ROLE, n)).fetchall()]
 
 
 def _expand(db: sqlite3.Connection, hit: Turn) -> list[Turn]:
     """Hit turn plus adjacent turns of the same session, up to a character allowance per side."""
     turns = [hit]
+    if hit.role == NOTE_ROLE:
+        return turns
     for before in (True, False):
         used = 0
         for nb in _neighbors(db, hit, before, config.NEIGHBOR_TURNS):
@@ -258,7 +313,15 @@ def _expand(db: sqlite3.Connection, hit: Turn) -> list[Turn]:
     return turns
 
 
-def _search(db: sqlite3.Connection, query: str, options: list[str], top_k: int) -> list[dict]:
+def _search(
+    db: sqlite3.Connection,
+    query: str,
+    options: list[str],
+    top_k: int,
+    qvec: np.ndarray | None = None,
+    extra: list[str] | None = None,
+    xvec: np.ndarray | None = None,
+) -> list[dict]:
     budget = config.CONTEXT_TOKENS
     windows: list[Window] = []
     used = 0
@@ -277,7 +340,7 @@ def _search(db: sqlite3.Connection, query: str, options: list[str], top_k: int) 
         return sum(est_tokens(t.content) + 4 for t in turns) + 16
 
     covered: set[int] = set()
-    ranked = _rank_hits(db, query, options)
+    ranked = _rank_hits(db, query, options, qvec, extra, xvec)
     if rerank.enabled() and ranked:
         ranked = _rerank(db, query, options, ranked)
     for rid in ranked:
@@ -303,7 +366,8 @@ def _search(db: sqlite3.Connection, query: str, options: list[str], top_k: int) 
             if used >= budget or len(windows) >= top_k:
                 break
             rows = db.execute(
-                "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? ORDER BY pos", (sess_no,)
+                "SELECT rid, sess_no, pos, role, ts, content FROM turns WHERE sess_no=? AND role!=? ORDER BY pos",
+                (sess_no, NOTE_ROLE),
             ).fetchall()
             rest = [Turn(*r) for r in rows if r[0] not in covered]
             if not rest:
@@ -331,7 +395,9 @@ def _adjacent(db: sqlite3.Connection, w: Window, turns: list[Turn]) -> bool:
         lo, hi = turns[-1].pos, w.lo
     else:
         return True
-    row = db.execute("SELECT 1 FROM turns WHERE sess_no=? AND pos>? AND pos<? LIMIT 1", (w.sess_no, lo, hi)).fetchone()
+    row = db.execute(
+        "SELECT 1 FROM turns WHERE sess_no=? AND pos>? AND pos<? AND role!=? LIMIT 1", (w.sess_no, lo, hi, NOTE_ROLE)
+    ).fetchone()
     return row is None
 
 

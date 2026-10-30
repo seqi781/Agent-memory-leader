@@ -11,9 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from . import config, rerank
+from . import config, embed, notes, rerank
 from .store import Piece, Store
-from .text import chunk_text
+from .text import chunk_text, format_time
 from .timeresolve import annotate
 
 log = logging.getLogger("aml_memory")
@@ -124,26 +124,44 @@ async def add(request: Request):
             raise BadRequest("'messages' must be a non-empty array")
         default_ts = _timestamp(body.get("timestamp"))
         pieces: list[Piece] = []
+        lines: list[str] = []
+        first_ts = None
         for i, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 raise BadRequest("each message must be an object")
             role = str(msg.get("role") or "user")
             text = _content_text(msg.get("content")).strip()
             if not text:
-                raise BadRequest(f"message {i} has empty content")
+                continue  # nothing to remember; keep the rest of the request
             ts = _timestamp(msg.get("timestamp"))
             ts = ts if ts is not None else default_ts
             if config.RESOLVE_TIME:
                 text = annotate(text, ts)
+            lines.append(f"{role}: {text}")
+            first_ts = first_ts if first_ts is not None else ts
             for j, chunk in enumerate(chunk_text(text, config.CHUNK_CHARS, config.CHUNK_OVERLAP)):
                 pieces.append(Piece(msg_idx=i, chunk_idx=j, role=role, ts=ts, content=chunk))
+        if not pieces:
+            raise BadRequest("all messages have empty content")
     except BadRequest as e:
         return _error(422, str(e))
     except ValueError:
         return _error(400, "invalid JSON")
 
     store: Store = state["store"]
-    await run_in_threadpool(store.add, request_id, user_id, session_id, pieces)  # idempotent on request_id
+    vectors = None
+    fresh = not await run_in_threadpool(store.has_request, user_id, request_id)
+    if fresh and notes.enabled():
+        date = format_time(first_ts) if first_ts is not None else ""
+        found = await run_in_threadpool(notes.extract, lines, date)
+        pieces += [Piece(msg_idx=999, chunk_idx=k, role=notes.ROLE, ts=first_ts, content=n) for k, n in enumerate(found)]
+    if fresh and embed.enabled():
+        try:
+            vectors = await run_in_threadpool(embed.embed, [f"{p.role}: {p.content}" for p in pieces])
+        except embed.EmbedError as e:
+            # Keep the write: keyword search still finds these turns.
+            log.warning("add %s stored without vectors: %s", request_id, e)
+    await run_in_threadpool(store.add, request_id, user_id, session_id, pieces, vectors)  # idempotent on request_id
     return {"success": True, "request_id": request_id, "user_id": user_id, "session_id": session_id}
 
 
@@ -169,5 +187,18 @@ async def search(request: Request):
     except ValueError:
         return _error(400, "invalid JSON")
 
-    data = await run_in_threadpool(state["store"].search, user_id, query, options, top_k)
+    store: Store = state["store"]
+    qvec = xvec = None
+    extra: list[str] = []
+    if top_k > 0 and await run_in_threadpool(store.exists, user_id):
+        if config.QUERY_EXPAND and notes.enabled_llm():
+            extra = await run_in_threadpool(notes.expand, query)
+        if embed.enabled():
+            try:
+                qvec = await run_in_threadpool(embed.embed_query, query)
+                if extra:
+                    xvec = await run_in_threadpool(embed.embed, extra)
+            except embed.EmbedError as e:
+                log.warning("search without dense retrieval: %s", e)
+    data = await run_in_threadpool(store.search, user_id, query, options, top_k, qvec, extra, xvec)
     return {"data": data[:top_k]}
