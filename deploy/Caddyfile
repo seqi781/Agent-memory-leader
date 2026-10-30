@@ -16,7 +16,17 @@ https://111.229.167.172 {
 	request_body {
 		max_size 64MB
 	}
-	# v0.4 (hybrid BM25 + text-embedding-v4) under /v4; v0.3 stays on the root paths.
+	# The leaderboard key's endpoints are fixed to the root paths, so the root serves the current
+	# version (v0.4, port 8010). v0.3 (port 8000, Full finished) stays reachable under /v3 for
+	# reproduction; /v4 is an alias of the root.
+	handle_path /v3/* {
+		reverse_proxy 127.0.0.1:8000 {
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+			}
+		}
+	}
 	handle_path /v4/* {
 		reverse_proxy 127.0.0.1:8010 {
 			transport http {
@@ -26,7 +36,7 @@ https://111.229.167.172 {
 		}
 	}
 	handle {
-		reverse_proxy 127.0.0.1:8000 {
+		reverse_proxy 127.0.0.1:8010 {
 			transport http {
 				read_timeout 30m
 				write_timeout 30m

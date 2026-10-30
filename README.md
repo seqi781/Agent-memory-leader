@@ -58,7 +58,7 @@ cp .env.example .env   # set AML_SERVICE_KEY
 .venv/bin/python scripts/contract_test.py http://127.0.0.1:8000 "$AML_SERVICE_KEY"
 ```
 
-Production deployment uses `deploy/aml-memory.service` (v0.3, port 8000) and `deploy/aml-memory-v4.service` (v0.4, port 8010, served under `/v4`) with systemd, behind `deploy/Caddyfile` (automatic HTTPS with a Let's Encrypt IP certificate).
+Production deployment uses systemd units `deploy/aml-memory-v4.service` (v0.4, port 8010) and `deploy/aml-memory.service` (v0.3, port 8000) behind `deploy/Caddyfile` (automatic HTTPS with a Let's Encrypt IP certificate). The registered endpoints are the root paths, served by v0.4; v0.3 stays reachable under `/v3` for reproduction.
 
 ## Local evaluation
 
