@@ -1,0 +1,17 @@
+[Unit]
+Description=AML memory Add/Search service v0.5 (GPU reranker), reached from the public server over Tailscale
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=motisi
+WorkingDirectory=/home/motisi/aml-prod
+Environment=MALLOC_ARENA_MAX=2
+# Listen on the Tailscale address only: the public server forwards to it, nothing else can reach it.
+ExecStart=/home/motisi/aml-eval/.venv/bin/python3 -m uvicorn aml_memory.main:app --host 100.100.92.37 --port 8010 --workers 4 --timeout-keep-alive 75
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -53,6 +53,8 @@ RERANK_BLEND = _int("RERANK_BLEND", 0)  # 0 = order by reranker score, 1 = RRF o
 RERANK_THREADS = _int("RERANK_THREADS", 2)
 RERANK_BATCH = _int("RERANK_BATCH", 16)
 RERANK_MAX_TOKENS = _int("RERANK_MAX_TOKENS", 256)  # query + candidate, truncated
+RERANK_BACKEND = os.environ.get("RERANK_BACKEND", "onnx")  # onnx (CPU, default) or torch (transformers, GPU)
+RERANK_DEVICE = os.environ.get("RERANK_DEVICE", "")  # torch backend: cuda / cpu (default: cuda if available)
 
 # Dense retrieval with text-embedding-v4 (leave EMBED_MODEL empty to run keyword-only).
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-v4")

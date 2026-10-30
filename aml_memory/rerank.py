@@ -57,9 +57,47 @@ def _load() -> None:
     _tokenizer, _session = tok, sess
 
 
+_torch = None  # (tokenizer, model, device) when RERANK_BACKEND=torch
+
+
+def _load_torch() -> None:
+    """Hugging Face transformers backend, for larger cross-encoders on a GPU."""
+    global _torch
+    if _torch is not None:
+        return
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    device = config.RERANK_DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
+    tok = AutoTokenizer.from_pretrained(config.RERANK_MODEL, cache_dir=str(config.MODEL_DIR))
+    model = AutoModelForSequenceClassification.from_pretrained(
+        config.RERANK_MODEL, cache_dir=str(config.MODEL_DIR),
+        torch_dtype=torch.float16 if device.startswith("cuda") else torch.float32,
+    ).to(device).eval()
+    _torch = (tok, model, device)
+
+
+def _scores_torch(query: str, docs: list[str]) -> list[float]:
+    import torch
+
+    _load_torch()
+    tok, model, device = _torch
+    out: list[float] = []
+    for i in range(0, len(docs), config.RERANK_BATCH):
+        enc = tok([query] * len(docs[i : i + config.RERANK_BATCH]), docs[i : i + config.RERANK_BATCH],
+                  padding=True, truncation="only_second", max_length=config.RERANK_MAX_TOKENS, return_tensors="pt")
+        with torch.inference_mode():
+            logits = model(**{k: v.to(device) for k, v in enc.items()}).logits
+        out.extend(float(x) for x in logits.float().reshape(logits.shape[0], -1)[:, 0].cpu())
+    return out
+
+
 def scores(query: str, docs: list[str]) -> list[float]:
     if not docs:
         return []
+    if config.RERANK_BACKEND == "torch":
+        with _lock:
+            return _scores_torch(query, docs)
     out: list[float] = []
     with _lock:  # one inference at a time per process keeps CPU and memory predictable
         _load()

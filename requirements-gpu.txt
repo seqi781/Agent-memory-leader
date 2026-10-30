@@ -1,0 +1,5 @@
+-r requirements.txt
+# v0.5 GPU reranker (bge-reranker-v2-m3 via transformers); install torch from the CUDA index matching the driver,
+# e.g. pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.6
+transformers>=4.44

@@ -27,7 +27,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from aml_memory.text import est_tokens  # noqa: E402
 
-BUDGETS = [8000, 16000, 32000, 64000, 100000]
+BUDGETS = [2000, 4000, 8000, 16000, 32000]
 LOCOMO_CATEGORY = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop"}
 
 
