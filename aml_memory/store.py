@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import logging
 import re
 import sqlite3
 import threading
@@ -18,6 +19,8 @@ import numpy as np
 from . import config, rerank
 from .notes import ROLE as NOTE_ROLE
 from .text import est_tokens, format_time, iso_time, keyword_tokens
+
+log = logging.getLogger("aml_memory.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
@@ -268,7 +271,11 @@ def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list
         docs.append(text)
         keep.append(rid)
     q = query if not options else query + "\n" + "\n".join(options)
-    sc = rerank.scores(q, docs)
+    try:
+        sc = rerank.scores(q, docs)
+    except Exception:  # never fail a Search because of the reranker: keep the fused order
+        log.exception("rerank failed; using fused order")
+        return ranked
     by_ce = [rid for _, rid in sorted(zip(sc, keep), key=lambda x: -x[0])]
     if config.RERANK_BLEND:
         fused: dict[int, float] = {}

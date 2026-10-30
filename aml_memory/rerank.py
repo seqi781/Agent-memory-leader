@@ -82,6 +82,14 @@ def _scores_torch(query: str, docs: list[str]) -> list[float]:
 
     _load_torch()
     tok, model, device = _torch
+    # Long queries (streaming turns, many options) would leave no room for the candidate, and
+    # "only_second" truncation then fails. Cap the query at half the window, keeping its start and
+    # its end (the actual question usually comes last).
+    qmax = config.RERANK_MAX_TOKENS // 2
+    qids = tok(query, add_special_tokens=False)["input_ids"]
+    if len(qids) > qmax:
+        head = qmax // 4
+        query = tok.decode(qids[:head]) + " ... " + tok.decode(qids[-(qmax - head - 4):])
     out: list[float] = []
     for i in range(0, len(docs), config.RERANK_BATCH):
         enc = tok([query] * len(docs[i : i + config.RERANK_BATCH]), docs[i : i + config.RERANK_BATCH],

@@ -86,6 +86,7 @@ Production (v0.5): the public HTTPS front is Caddy on a cloud server (`deploy/Ca
 
 ## Changelog
 
+- **v0.5.1**: fixes v0.5 Search failing with HTTP 500 on very long queries (the GPU reranker's tokenizer could not truncate a query longer than its window); long queries are now cut to their start and end, and any reranker error falls back to the fused order instead of failing the request.
 - **v0.5**: GPU reranker. `BAAI/bge-reranker-v2-m3` replaces MiniLM-L6 (512-token inputs, 1,500 characters per candidate); the service runs on a GPU host behind the same public endpoint. Retrieval, windows and budget are unchanged from v0.4.
 - **v0.4**: hybrid retrieval. Every record is embedded with `text-embedding-v4` at Add time, and Search fuses a dense cosine list with the BM25 lists before cross-encoder reranking. Empty messages inside an Add are now skipped instead of rejecting the request.
 - **v0.3**: added a local cross-encoder reranker over the BM25 candidates, widened session windows to 4 turns per side, and raised the evidence budget to 16k tokens.
