@@ -188,7 +188,7 @@ async def search(request: Request):
         return _error(400, "invalid JSON")
 
     store: Store = state["store"]
-    qvec = xvec = None
+    qvec = xvec = ovecs = None
     extra: list[str] = []
     if top_k > 0 and await run_in_threadpool(store.exists, user_id):
         if config.QUERY_EXPAND and notes.enabled_llm():
@@ -200,5 +200,13 @@ async def search(request: Request):
                     xvec = await run_in_threadpool(embed.embed, extra)
             except embed.EmbedError as e:
                 log.warning("search without dense retrieval: %s", e)
-    data = await run_in_threadpool(store.search, user_id, query, options, top_k, qvec, extra, xvec)
+            if config.OPTION_SEARCH and len(options) >= 2 and qvec is not None:
+                # Option first, then as much of the question as fits the embedding window.
+                room = max(200, config.EMBED_CHARS - 1)
+                texts = [(o[:room] + "\n" + query)[:room] for o in options[: config.OPTION_MAX]]
+                try:
+                    ovecs = await run_in_threadpool(embed.embed, texts)
+                except embed.EmbedError as e:
+                    log.warning("search without option vectors: %s", e)
+    data = await run_in_threadpool(store.search, user_id, query, options, top_k, qvec, extra, xvec, ovecs)
     return {"data": data[:top_k]}

@@ -133,13 +133,15 @@ async def main() -> None:
     ap.add_argument("--answer-model", default="openai/gpt-4o-mini")
     ap.add_argument("--judge-model", default="openai/gpt-4o-mini")
     ap.add_argument("--concurrency", type=int, default=8)
+    ap.add_argument("--run", default="", help="fixed run id, so another service can search the same stored users")
+    ap.add_argument("--skip-ingest", action="store_true", help="search users already stored under --run")
     args = ap.parse_args()
 
     pipe = load_pipeline(Path(args.pipeline), "locomo-refined" if args.dataset == "locomo" else "longmemeval-s")
     samples = locomo_samples(args.data) if args.dataset == "locomo" else lme_samples(args.data)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    run = uuid.uuid4().hex[:6]
+    run = args.run or uuid.uuid4().hex[:6]
     headers = {"Authorization": f"Bearer {args.key}"} if args.key else {}
     llm_key = os.environ.get(args.llm_key_env, "")
     sem = asyncio.Semaphore(args.concurrency)
@@ -155,7 +157,8 @@ async def main() -> None:
                 qs = qs[: args.max_questions]
             user_id = f"{args.dataset}:{run}:{ukey}"
             t0 = time.time()
-            await ingest(svc, user_id, run, sessions, sem)
+            if not args.skip_ingest:
+                await ingest(svc, user_id, run, sessions, sem)
             t_ingest += time.time() - t0
 
             async def one(q: dict) -> dict:

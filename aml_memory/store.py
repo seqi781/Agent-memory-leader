@@ -68,6 +68,7 @@ class Turn:
 class Window:
     sess_no: int
     turns: list[Turn] = field(default_factory=list)
+    note: str = ""
 
     @property
     def lo(self) -> int:
@@ -186,6 +187,7 @@ class Store:
         qvec: np.ndarray | None = None,
         extra: list[str] | None = None,
         xvec: np.ndarray | None = None,
+        ovecs: np.ndarray | None = None,
     ) -> list[dict]:
         if top_k <= 0:
             return []
@@ -193,7 +195,7 @@ class Store:
         if udb is None:
             return []
         with udb.lock:
-            return _search(udb.db, query, options, top_k, qvec, extra, xvec)
+            return _search(udb.db, query, options, top_k, qvec, extra, xvec, ovecs)
 
     def stats(self) -> dict:
         users = list((config.DATA_DIR / "users").glob("*/*.db")) if (config.DATA_DIR / "users").exists() else []
@@ -211,20 +213,50 @@ def _bm25(db: sqlite3.Connection, text: str, limit: int) -> list[int]:
 
 
 def _dense(db: sqlite3.Connection, qvec: np.ndarray, limit: int) -> list[int]:
-    """Nearest turns by cosine similarity. Vectors are scanned in blocks to keep memory flat."""
-    q = qvec.astype(np.float32)
-    best: list[tuple[float, int]] = []
+    return _dense_multi(db, qvec[None, :], limit)[0]
+
+
+def _dense_multi(db: sqlite3.Connection, qmat: np.ndarray, limit: int) -> list[list[int]]:
+    """Nearest turns by cosine similarity for each row of qmat, in one pass over the stored vectors.
+    Vectors are scanned in blocks to keep memory flat."""
+    q = qmat.astype(np.float32)
+    best: list[list[tuple[float, int]]] = [[] for _ in range(len(q))]
     cur = db.execute("SELECT rid, v FROM vecs")
     while True:
         rows = cur.fetchmany(4096)
         if not rows:
             break
         mat = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1)
-        sims = mat.astype(np.float32) @ q
+        sims = mat.astype(np.float32) @ q.T
         k = min(limit, len(rows))
-        idx = np.argpartition(-sims, k - 1)[:k]
-        best = heapq.nlargest(limit, best + [(float(sims[i]), rows[i][0]) for i in idx])
-    return [rid for _, rid in best]
+        for j in range(len(q)):
+            col = sims[:, j]
+            idx = np.argpartition(-col, k - 1)[:k]
+            best[j] = heapq.nlargest(limit, best[j] + [(float(col[i]), rows[i][0]) for i in idx])
+    return [[rid for _, rid in b] for b in best]
+
+
+def _rrf(lists: list[tuple[list[int], float]]) -> list[int]:
+    fused: dict[int, float] = {}
+    for lst, weight in lists:
+        for rank, rid in enumerate(lst):
+            fused[rid] = fused.get(rid, 0.0) + weight / (config.RRF_K + rank + 1)
+    return [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+
+
+def _option_lists(db: sqlite3.Connection, query: str, options: list[str], ovecs: np.ndarray | None) -> list[list[int]]:
+    """One ranked list per answer option (keywords + dense), so every option gets its own evidence.
+    The option text goes first so its terms survive the keyword cap."""
+    dense: list[list[int]] = [[] for _ in options]
+    if ovecs is not None and len(ovecs) == len(options) and config.DENSE_CANDIDATES > 0:
+        dense = _dense_multi(db, ovecs, config.DENSE_CANDIDATES)
+    out = []
+    for opt, dl in zip(options, dense):
+        lists = [(_bm25(db, opt + "\n" + query, config.CANDIDATES), 1.0)]
+        if dl:
+            lists.append((dl, config.DENSE_WEIGHT))
+        out.append(_rrf(lists))
+    return out
 
 
 def _rank_hits(
@@ -234,11 +266,14 @@ def _rank_hits(
     qvec: np.ndarray | None = None,
     extra: list[str] | None = None,
     xvec: np.ndarray | None = None,
+    opt_lists: list[list[int]] | None = None,
 ) -> list[int]:
     n = config.CANDIDATES
     lists = [(_bm25(db, query, n), 1.0)]
     if options:
         lists.append((_bm25(db, query + "\n" + "\n".join(options), n), 1.0))
+    for lst in opt_lists or []:
+        lists.append((lst, config.OPTION_WEIGHT))
     if qvec is not None and config.DENSE_CANDIDATES > 0:
         lists.append((_dense(db, qvec, config.DENSE_CANDIDATES), config.DENSE_WEIGHT))
     for q in extra or []:
@@ -248,16 +283,21 @@ def _rank_hits(
             lists.append((_dense(db, v, config.DENSE_CANDIDATES), config.EXPAND_WEIGHT * config.DENSE_WEIGHT))
     if len(lists) == 1:
         return lists[0][0]
-    fused: dict[int, float] = {}
-    for lst, weight in lists:
-        for rank, rid in enumerate(lst):
-            fused[rid] = fused.get(rid, 0.0) + weight / (config.RRF_K + rank + 1)
-    return [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+    return _rrf(lists)
 
 
-def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list[int]) -> list[int]:
-    """Re-score the top BM25 candidates with the cross-encoder; the tail keeps BM25 order."""
-    head, tail = ranked[: config.RERANK_TOP], ranked[config.RERANK_TOP :]
+def _rerank(
+    db: sqlite3.Connection, query: str, options: list[str], ranked: list[int], extra_rids: list[int] | None = None,
+) -> tuple[list[int], dict[int, float]]:
+    """Re-score the top fused candidates (plus extra_rids) with the cross-encoder; the tail keeps
+    the fused order. Returns the new order and the cross-encoder score of each re-scored record."""
+    head = ranked[: config.RERANK_TOP]
+    seen = set(head)
+    for rid in extra_rids or []:
+        if rid not in seen:
+            head.append(rid)
+            seen.add(rid)
+    tail = [rid for rid in ranked if rid not in seen]
     docs, keep = [], []
     for rid in head:
         t = _turn(db, rid)
@@ -275,7 +315,7 @@ def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list
         sc = rerank.scores(q, docs)
     except Exception:  # never fail a Search because of the reranker: keep the fused order
         log.exception("rerank failed; using fused order")
-        return ranked
+        return ranked, {}
     by_ce = [rid for _, rid in sorted(zip(sc, keep), key=lambda x: -x[0])]
     if config.RERANK_BLEND:
         fused: dict[int, float] = {}
@@ -283,7 +323,19 @@ def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list
             for rank, rid in enumerate(lst):
                 fused[rid] = fused.get(rid, 0.0) + 1.0 / (config.RRF_K + rank + 1)
         by_ce = [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
-    return by_ce + tail
+    return by_ce + tail, dict(zip(keep, sc))
+
+
+def _option_seeds(opt_lists: list[list[int]], scores: dict[int, float]) -> list[int]:
+    """The best record for each option: among the option's top candidates, the one the
+    cross-encoder rates highest (or simply its first one without scores)."""
+    seeds: list[int] = []
+    for lst in opt_lists:
+        pool = [rid for rid in lst[: config.OPTION_POOL] if rid not in seeds]
+        if scores:
+            pool = sorted((rid for rid in pool if rid in scores), key=lambda r: -scores[r]) or pool
+        seeds.extend(pool[: config.OPTION_SEEDS])
+    return seeds
 
 
 def _turn(db: sqlite3.Connection, rid: int) -> Turn | None:
@@ -320,6 +372,86 @@ def _expand(db: sqlite3.Connection, hit: Turn) -> list[Turn]:
     return turns
 
 
+_CAP_PHRASE = re.compile(r"\b[A-Z][A-Za-z0-9'&.-]+(?:\s+[A-Z][A-Za-z0-9'&.-]+)*")
+
+
+def _vec(db: sqlite3.Connection, rid: int) -> np.ndarray | None:
+    row = db.execute("SELECT v FROM vecs WHERE rid=?", (rid,)).fetchone()
+    return np.frombuffer(row[0], dtype=np.float16).astype(np.float32) if row else None
+
+
+def _later(a: Turn, b: Turn) -> bool:
+    """True when b was said after a (timestamps first, then session and position)."""
+    if a.ts is not None and b.ts is not None and a.ts != b.ts:
+        return b.ts > a.ts
+    return (b.sess_no, b.pos) > (a.sess_no, a.pos)
+
+
+def _entities(texts: list[str], query: str, limit: int) -> list[str]:
+    """Capitalised names/phrases in the top hits that the question does not already contain."""
+    qterms = set(keyword_tokens(query))
+    out: list[str] = []
+    for text in texts:
+        for m in _CAP_PHRASE.finditer(text):
+            terms = [t for t in keyword_tokens(m.group(0)) if t not in qterms]
+            phrase = " ".join(terms)
+            if terms and phrase not in out and not (len(terms) == 1 and len(terms[0]) < 3):
+                out.append(phrase)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _second_round(db: sqlite3.Connection, query: str, qvec: np.ndarray | None, ranked: list[int]) -> list[list[int]]:
+    """Pseudo-relevance feedback: search again with what the best first-round hits contain.
+    (1) dense: question vector moved towards the top hits (Rocchio); (2) keywords: names and
+    phrases from the top hits that are not in the question."""
+    top = ranked[: config.PRF_TOP]
+    lists: list[list[int]] = []
+    if qvec is not None and config.DENSE_CANDIDATES > 0:
+        vecs = [v for v in (_vec(db, rid) for rid in top) if v is not None]
+        if vecs:
+            q2 = qvec.astype(np.float32) + config.PRF_BETA * np.mean(vecs, axis=0)
+            q2 /= max(float(np.linalg.norm(q2)), 1e-9)
+            lists.append(_dense(db, q2, config.PRF_POOL))
+    texts = [t.content for t in (_turn(db, rid) for rid in top) if t is not None]
+    ents = _entities(texts, query, config.PRF_ENTITIES)
+    if ents:
+        lists.append(_bm25(db, " ".join(ents), config.PRF_POOL))
+    return lists
+
+
+def _newer_links(db: sqlite3.Connection, ranked: list[int]) -> dict[int, int]:
+    """For the leading hits: a later record saying something very similar (a possible update),
+    found by vector similarity plus at least one shared keyword. One pass over the vectors."""
+    heads = [(rid, _turn(db, rid), _vec(db, rid)) for rid in ranked[: config.UPDATE_TOP]]
+    heads = [(rid, t, v) for rid, t, v in heads if t is not None and v is not None and t.role != NOTE_ROLE]
+    if not heads:
+        return {}
+    near = _dense_multi(db, np.stack([v for _, _, v in heads]), 20)
+    links: dict[int, int] = {}
+    for (rid, t, v), cands in zip(heads, near):
+        terms = set(keyword_tokens(t.content))
+        best_key: tuple[int, float] | None = None
+        best_rid = -1
+        for c in cands:
+            if c == rid:
+                continue
+            ct = _turn(db, c)
+            cv = _vec(db, c)
+            if ct is None or cv is None or ct.role == NOTE_ROLE or not _later(t, ct):
+                continue
+            sim = float(cv @ v)
+            if sim < config.UPDATE_SIM or not (terms & set(keyword_tokens(ct.content))):
+                continue
+            key = (ct.ts or 0, sim)  # the latest such record, then the most similar
+            if best_key is None or key > best_key:
+                best_key, best_rid = key, c
+        if best_key is not None:
+            links[rid] = best_rid
+    return links
+
+
 def _search(
     db: sqlite3.Connection,
     query: str,
@@ -328,6 +460,7 @@ def _search(
     qvec: np.ndarray | None = None,
     extra: list[str] | None = None,
     xvec: np.ndarray | None = None,
+    ovecs: np.ndarray | None = None,
 ) -> list[dict]:
     budget = config.CONTEXT_TOKENS
     windows: list[Window] = []
@@ -347,24 +480,89 @@ def _search(
         return sum(est_tokens(t.content) + 4 for t in turns) + 16
 
     covered: set[int] = set()
-    ranked = _rank_hits(db, query, options, qvec, extra, xvec)
+    opts = options[: config.OPTION_MAX] if config.OPTION_SEARCH and len(options) >= 2 else []
+    opt_lists = _option_lists(db, query, opts, ovecs) if opts else []
+    ranked = _rank_hits(db, query, options, qvec, extra, xvec, opt_lists)
+    scores: dict[int, float] = {}
+    rq_opts = options if (not opts or config.RERANK_OPTIONS) else []
     if rerank.enabled() and ranked:
-        ranked = _rerank(db, query, options, ranked)
+        extra_rids = [rid for lst in opt_lists for rid in lst[: config.OPTION_POOL]]
+        # With per-option evidence, the cross-encoder judges relevance to the question alone
+        # (long option lists would otherwise crowd the question out of its window).
+        ranked, scores = _rerank(db, query, rq_opts, ranked, extra_rids)
+    if opt_lists and config.OPTION_SEEDS > 0:
+        seeds = _option_seeds(opt_lists, scores)
+        head = ranked[: config.OPTION_SEED_AFTER]
+        seeds = [rid for rid in seeds if rid not in head]
+        seed_set = set(seeds)
+        rest = [rid for rid in ranked[config.OPTION_SEED_AFTER :] if rid not in seed_set]
+        ranked = head + seeds + rest
+    if config.PRF and ranked:
+        lists = _second_round(db, query, qvec, ranked)
+        new = list(dict.fromkeys(rid for lst in lists for rid in lst if rid not in scores))
+        if new and rerank.enabled() and scores:
+            # New candidates are judged by the same cross-encoder, so they only rise if relevant.
+            _, extra_scores = _rerank(db, query, rq_opts, new)
+            scores.update(extra_scores)
+            ranked = sorted(scores, key=lambda r: -scores[r]) + [r for r in ranked if r not in scores]
+        elif new:
+            ranked = _rrf([(ranked, 1.0)] + [(lst, config.PRF_WEIGHT) for lst in lists])
+
+    links = _newer_links(db, ranked) if config.UPDATE_LINK else {}
+    per_sess: dict[int, int] = {}
+    picked_vecs: list[np.ndarray] = []
+    deferred: list[int] = []
+
+    def place(rid: int, note: str = "") -> bool:
+        """Add the record with its context window; False when the budget or top_k is exhausted."""
+        nonlocal used
+        hit = _turn(db, rid)
+        if hit is None:
+            return True
+        turns = _fit(_expand(db, hit), hit, budget - used)
+        n_before = len(windows)
+        cost = add_turns(hit.sess_no, turns)
+        if cost < 0:
+            return False
+        if note and len(windows) > n_before:
+            windows[-1].note = note
+        used += cost
+        covered.update(t.rid for t in turns)
+        per_sess[hit.sess_no] = per_sess.get(hit.sess_no, 0) + 1
+        return True
+
     for rid in ranked:
         if used >= budget:
             break
         if rid in covered:
             continue
-        hit = _turn(db, rid)
-        if hit is None:
-            continue
-        turns = _expand(db, hit)
-        turns = _fit(turns, hit, budget - used)
-        cost = add_turns(hit.sess_no, turns)
-        if cost < 0:
+        if config.SESSION_CAP or config.DUP_SIM:
+            hit = _turn(db, rid)
+            if hit is None:
+                continue
+            # Soft limits: postpone (never drop) a hit from a session that already gave
+            # SESSION_CAP windows, or one nearly identical to a hit already taken.
+            if config.SESSION_CAP and per_sess.get(hit.sess_no, 0) >= config.SESSION_CAP:
+                deferred.append(rid)
+                continue
+            if config.DUP_SIM:
+                v = _vec(db, rid)
+                if v is not None and any(float(v @ pv) >= config.DUP_SIM for pv in picked_vecs):
+                    deferred.append(rid)
+                    continue
+                if v is not None:
+                    picked_vecs.append(v)
+        if not place(rid):
             break
-        used += cost
-        covered.update(t.rid for t in turns)
+        newer = links.get(rid)
+        if newer is not None and newer not in covered and used < budget:
+            if not place(newer, "Later related message"):
+                break
+    for rid in deferred:  # second pass: postponed hits fill whatever budget is left
+        if used >= budget:
+            break
+        if rid not in covered and not place(rid):
+            break
 
     # Fill any remaining budget with whole sessions, most recent first, so small histories are
     # returned in full and large ones still get recent context.
@@ -421,7 +619,7 @@ def _fit(turns: list[Turn], hit: Turn, remaining: int) -> list[Turn]:
 
 
 def _render(w: Window, rank: int, total: int) -> dict:
-    lines = []
+    lines = [f"[{w.note}]"] if w.note else []
     first_ts = next((t.ts for t in w.turns if t.ts is not None), None)
     if first_ts is not None:
         lines.append(f"[Date: {format_time(first_ts)}]")

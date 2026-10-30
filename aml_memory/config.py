@@ -70,6 +70,28 @@ EMBED_CACHE = os.environ.get("EMBED_CACHE", "")  # optional sqlite file caching 
 DENSE_CANDIDATES = _int("DENSE_CANDIDATES", 200)  # nearest turns by cosine added to the candidate pool
 DENSE_WEIGHT = float(os.environ.get("DENSE_WEIGHT", 1.0))  # weight of the dense list in rank fusion
 
+# Multiple-choice questions: retrieve evidence for each option separately (OPTION_SEARCH=0 turns it off).
+OPTION_SEARCH = _int("OPTION_SEARCH", 0)
+OPTION_MAX = _int("OPTION_MAX", 10)  # options handled per question (one embedding call)
+OPTION_WEIGHT = float(os.environ.get("OPTION_WEIGHT", 0.5))  # weight of each option's list in fusion
+OPTION_POOL = _int("OPTION_POOL", 10)  # top candidates per option added to reranking
+OPTION_SEEDS = _int("OPTION_SEEDS", 1)  # best records per option guaranteed a place
+OPTION_SEED_AFTER = _int("OPTION_SEED_AFTER", 3)  # option seeds go right after this many top hits
+RERANK_OPTIONS = _int("RERANK_OPTIONS", 0)  # with OPTION_SEARCH: 1 = also show options to the reranker
+
+# Evidence selection experiments (all off by default).
+SESSION_CAP = _int("SESSION_CAP", 0)  # soft cap: hits per session in the first pass (rest postponed)
+DUP_SIM = float(os.environ.get("DUP_SIM", 0))  # postpone hits with cosine >= this to a hit already taken
+UPDATE_LINK = _int("UPDATE_LINK", 0)  # add a later, very similar record right after a leading hit
+UPDATE_TOP = _int("UPDATE_TOP", 10)  # leading hits checked for later related records
+UPDATE_SIM = float(os.environ.get("UPDATE_SIM", 0.8))  # cosine needed to link a later record
+PRF = _int("PRF", 0)  # second-round retrieval from the top hits (pseudo-relevance feedback)
+PRF_TOP = _int("PRF_TOP", 3)  # top hits used as feedback
+PRF_BETA = float(os.environ.get("PRF_BETA", 0.7))  # weight of the top-hit centroid added to the question vector
+PRF_POOL = _int("PRF_POOL", 30)  # candidates taken from each second-round list
+PRF_ENTITIES = _int("PRF_ENTITIES", 6)  # names/phrases from the top hits used as a keyword query
+PRF_WEIGHT = float(os.environ.get("PRF_WEIGHT", 0.5))  # fusion weight when no reranker is available
+
 # Write-time memory notes with gpt-4o-mini (NOTES=0 turns them off).
 NOTES = _int("NOTES", 0)
 NOTES_MODEL = os.environ.get("NOTES_MODEL", "openai/gpt-4o-mini")
