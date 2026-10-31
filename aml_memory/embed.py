@@ -54,6 +54,10 @@ def _http() -> httpx.Client:
                 headers={"Authorization": f"Bearer {config.EMBED_API_KEY}"},
                 timeout=config.EMBED_TIMEOUT,
                 limits=httpx.Limits(max_connections=config.EMBED_CONCURRENCY * 2),
+                # Hosts without working IPv6 stall on every new connection unless bound to IPv4.
+                transport=httpx.HTTPTransport(
+                    local_address="0.0.0.0", limits=httpx.Limits(max_connections=config.EMBED_CONCURRENCY * 2)
+                ) if config.EMBED_IPV4 else None,
             )
         return _client
 

@@ -66,9 +66,14 @@ EMBED_CONCURRENCY = _int("EMBED_CONCURRENCY", 8)  # in-flight API calls per work
 EMBED_CHARS = _int("EMBED_CHARS", 2000)  # characters of each turn sent for embedding
 EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", 30))
 EMBED_RETRIES = _int("EMBED_RETRIES", 9)
+EMBED_IPV4 = _int("EMBED_IPV4", 0)  # 1 = connect over IPv4 only
 EMBED_CACHE = os.environ.get("EMBED_CACHE", "")  # optional sqlite file caching vectors (local experiments)
 DENSE_CANDIDATES = _int("DENSE_CANDIDATES", 200)  # nearest turns by cosine added to the candidate pool
 DENSE_WEIGHT = float(os.environ.get("DENSE_WEIGHT", 1.0))  # weight of the dense list in rank fusion
+# Multiple-choice queries: one candidate list group per option, merged by best rank (OPTION_MERGE=0 = off).
+OPTION_MERGE = _int("OPTION_MERGE", 0)
+OPTION_LIST = _int("OPTION_LIST", 100)  # hits kept from each per-option list
+OPTION_RERANK = _int("OPTION_RERANK", 1)  # 0 = keep the merged order for multiple-choice queries (CPU hosts)
 
 # Write-time memory notes with gpt-4o-mini (NOTES=0 turns them off).
 NOTES = _int("NOTES", 0)

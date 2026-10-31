@@ -18,7 +18,7 @@ import numpy as np
 
 from . import config, rerank
 from .notes import ROLE as NOTE_ROLE
-from .text import est_tokens, format_time, iso_time, keyword_tokens
+from .text import STOPWORDS, est_tokens, format_time, iso_time, keyword_tokens
 
 log = logging.getLogger("aml_memory.store")
 
@@ -186,6 +186,7 @@ class Store:
         qvec: np.ndarray | None = None,
         extra: list[str] | None = None,
         xvec: np.ndarray | None = None,
+        ovecs: np.ndarray | None = None,
     ) -> list[dict]:
         if top_k <= 0:
             return []
@@ -193,7 +194,7 @@ class Store:
         if udb is None:
             return []
         with udb.lock:
-            return _search(udb.db, query, options, top_k, qvec, extra, xvec)
+            return _search(udb.db, query, options, top_k, qvec, extra, xvec, ovecs)
 
     def stats(self) -> dict:
         users = list((config.DATA_DIR / "users").glob("*/*.db")) if (config.DATA_DIR / "users").exists() else []
@@ -234,8 +235,11 @@ def _rank_hits(
     qvec: np.ndarray | None = None,
     extra: list[str] | None = None,
     xvec: np.ndarray | None = None,
+    ovecs: np.ndarray | None = None,
 ) -> list[int]:
     n = config.CANDIDATES
+    if options and config.OPTION_MERGE:
+        return _option_merge(db, query, options, qvec, ovecs)
     lists = [(_bm25(db, query, n), 1.0)]
     if options:
         lists.append((_bm25(db, query + "\n" + "\n".join(options), n), 1.0))
@@ -253,6 +257,57 @@ def _rank_hits(
         for rank, rid in enumerate(lst):
             fused[rid] = fused.get(rid, 0.0) + weight / (config.RRF_K + rank + 1)
     return [rid for rid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+
+
+def option_unique_words(options: list[str]) -> list[str]:
+    """Words of each option that no other option uses (the part that tells the options apart)."""
+    words = [re.findall(r"[a-z0-9']+", o.lower()) for o in options]
+    sets = [{w for w in ws if len(w) > 2 and w not in STOPWORDS} for ws in words]
+    out = []
+    for i, ws in enumerate(words):
+        others = set().union(*(x for j, x in enumerate(sets) if j != i))
+        out.append(" ".join(w for w in dict.fromkeys(ws) if w in sets[i] and w not in others))
+    return out
+
+
+def _option_merge(
+    db: sqlite3.Connection, query: str, options: list[str], qvec: np.ndarray | None, ovecs: np.ndarray | None
+) -> list[int]:
+    """One group per option: BM25(question + option), BM25(question + the option's own words) and
+    dense(question + option), plus the question-only BM25 and dense lists. Inside a group a turn
+    takes its best rank over the lists; across groups it takes its best group rank. Ties go to
+    the summed reciprocal rank over all lists."""
+    n, m = config.CANDIDATES, config.OPTION_LIST
+    shared = [_bm25(db, query, n)]
+    if qvec is not None and config.DENSE_CANDIDATES > 0:
+        shared.append(_dense(db, qvec, config.DENSE_CANDIDATES))
+    uniq = option_unique_words(options)
+    every: list[list[int]] = list(shared)
+    groups: list[list[list[int]]] = []
+    for i, opt in enumerate(options):
+        lists = [_bm25(db, query + "\n" + opt, n)[:m]]
+        if uniq[i]:
+            lists.append(_bm25(db, query + "\n" + uniq[i], n)[:m])
+        if ovecs is not None and i < len(ovecs) and config.DENSE_CANDIDATES > 0:
+            lists.append(_dense(db, ovecs[i], config.DENSE_CANDIDATES)[:m])
+        every += lists
+        groups.append(lists + shared)
+    tie: dict[int, float] = {}
+    for lst in every:
+        for rank, rid in enumerate(lst):
+            tie[rid] = tie.get(rid, 0.0) + 1.0 / (config.RRF_K + rank + 1)
+    best: dict[int, int] = {}
+    for lists in groups:
+        inside: dict[int, int] = {}
+        for lst in lists:
+            for rank, rid in enumerate(lst):
+                if rank < inside.get(rid, 1 << 30):
+                    inside[rid] = rank
+        order = sorted(inside, key=lambda r: (inside[r], -tie[r]))
+        for rank, rid in enumerate(order):
+            if rank < best.get(rid, 1 << 30):
+                best[rid] = rank
+    return sorted(best, key=lambda r: (best[r], -tie[r]))
 
 
 def _rerank(db: sqlite3.Connection, query: str, options: list[str], ranked: list[int]) -> list[int]:
@@ -328,6 +383,7 @@ def _search(
     qvec: np.ndarray | None = None,
     extra: list[str] | None = None,
     xvec: np.ndarray | None = None,
+    ovecs: np.ndarray | None = None,
 ) -> list[dict]:
     budget = config.CONTEXT_TOKENS
     windows: list[Window] = []
@@ -347,8 +403,8 @@ def _search(
         return sum(est_tokens(t.content) + 4 for t in turns) + 16
 
     covered: set[int] = set()
-    ranked = _rank_hits(db, query, options, qvec, extra, xvec)
-    if rerank.enabled() and ranked:
+    ranked = _rank_hits(db, query, options, qvec, extra, xvec, ovecs)
+    if rerank.enabled() and ranked and not (options and config.OPTION_MERGE and not config.OPTION_RERANK):
         ranked = _rerank(db, query, options, ranked)
     for rid in ranked:
         if used >= budget:
