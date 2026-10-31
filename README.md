@@ -4,7 +4,7 @@ A long-term memory service for the [Agent Memory Leaderboard](https://agentmemor
 
 It implements the AML Add / Search contract: Add stores conversation turns, and Search returns ranked memory evidence. The platform generates answers and scores them. Search never generates answers.
 
-## Method (v0.5)
+## Method (v0.6)
 
 **Add**
 - Each `user_id` gets its own SQLite database file, so isolation is physical and keyword statistics are computed per user.
@@ -20,8 +20,9 @@ It implements the AML Add / Search contract: Add stores conversation turns, and 
 - Add is idempotent on `request_id`, so platform retries never duplicate memories.
 
 **Search**
+- **Multiple-choice queries (v0.6):** when `options` are present, retrieval runs one group per option: BM25(question + option), BM25(question + the words only that option uses) and dense(question + option), each cut to its top 100, plus the question-only BM25 and dense lists. Inside a group a record takes its best rank over the lists; across groups it takes its best group rank; ties go to the summed reciprocal rank. Queries without options keep the hybrid retrieval below. On 210 PersonaMem-v2 questions (local, evidence located automatically) the share with the preference evidence in the top 30 rose from 56% (v0.4 pipeline) to 75–77%; answer accuracy with qwen-flash rose by 1.7 points (3 runs, not significant).
 - **Hybrid retrieval:** BM25 ranks the user's turns against the question; when `options` are present, a second BM25 query that includes them is added. The question is also embedded with `text-embedding-v4`, and the 200 nearest records by cosine similarity form a dense list. The lists are fused with Reciprocal Rank Fusion. Dense retrieval finds paraphrased evidence that shares no keywords with the question. If the query embedding fails, Search falls back to BM25 only.
-- **Cross-encoder reranking:** the top 100 fused candidates are re-scored by `BAAI/bge-reranker-v2-m3` (568M parameters), run locally on the service's GPU in fp16 with transformers (query + candidate capped at 512 tokens, up to 1,500 characters of each candidate). It adds no API cost. Each candidate is scored together with the preceding turn, so short replies keep their context. v0.3/v0.4 used the 22M-parameter `ms-marco-MiniLM-L-6-v2` on CPU (ONNX, 256 tokens), which is still the default when `RERANK_BACKEND` is not set to `torch`.
+- **Cross-encoder reranking:** the top 50 fused candidates (v0.5: 100) are re-scored by `BAAI/bge-reranker-v2-m3` (568M parameters), run locally on the service's GPU in fp16 with transformers (query + candidate capped at 512 tokens, up to 1,500 characters of each candidate). It adds no API cost. Each candidate is scored together with the preceding turn, so short replies keep their context. v0.3/v0.4 used the 22M-parameter `ms-marco-MiniLM-L-6-v2` on CPU (ONNX, 256 tokens), which is still the default when `RERANK_BACKEND` is not set to `torch`.
 - Each hit is expanded into a **session window**: the hit plus up to four adjacent turns on each side (at most 800 characters per side) from the same session. Overlapping or adjacent windows are merged.
 - Windows are returned in relevance order. Each starts with its absolute date, for example `[Date: 8 May 2023 (Monday), 13:56]`, followed by `speaker: text` lines.
 - Evidence is packed into a budget of about **16k tokens**. If the user's history is smaller than that, the remaining budget is filled with whole sessions, most recent first.
@@ -86,6 +87,7 @@ Production (v0.5): the public HTTPS front is Caddy on a cloud server (`deploy/Ca
 
 ## Changelog
 
+- **v0.6**: per-option merged retrieval for multiple-choice queries (`OPTION_MERGE=1`); the GPU reranker re-scores the top 50; `EMBED_IPV4=1` binds embedding calls to IPv4 on hosts without working IPv6. Submitted configuration: `deploy/aml-memory-v6.env.example`.
 - **v0.5.1**: fixes v0.5 Search failing with HTTP 500 on very long queries (the GPU reranker's tokenizer could not truncate a query longer than its window); long queries are now cut to their start and end, and any reranker error falls back to the fused order instead of failing the request.
 - **v0.5**: GPU reranker. `BAAI/bge-reranker-v2-m3` replaces MiniLM-L6 (512-token inputs, 1,500 characters per candidate); the service runs on a GPU host behind the same public endpoint. Retrieval, windows and budget are unchanged from v0.4.
 - **v0.4**: hybrid retrieval. Every record is embedded with `text-embedding-v4` at Add time, and Search fuses a dense cosine list with the BM25 lists before cross-encoder reranking. Empty messages inside an Add are now skipped instead of rejecting the request.
